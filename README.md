@@ -60,3 +60,10 @@ pip install -r requirements.txt
 # run the app
 streamlit run app.py
 
+---
+
+## Author
+**Mouli Basha D**  
+- [GitHub](https://github.com/mouli-basha)  
+- [Hugging Face](https://huggingface.co/moulibasha)
+
