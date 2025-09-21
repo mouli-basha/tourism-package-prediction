@@ -1,4 +1,7 @@
 
+import os
+from huggingface_hub import create_repo, upload_file
+
 SPACE_ID = "moulibasha/tourism-package-prediction"
 
 def get_token():
@@ -6,6 +9,8 @@ def get_token():
 
 def main():
     token = get_token()
+    if not token:
+        raise RuntimeError("HF_TOKEN is not set. Add it as a GitHub Actions secret.")
 
     # Ensure the Space exists and is Streamlit
     try:
