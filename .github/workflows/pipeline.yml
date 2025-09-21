@@ -194,26 +194,6 @@ jobs:
           os.makedirs("models", exist_ok=True)
           joblib.dump(gs.best_estimator_, "models/model.pkl")
 
-          readme = f"""---
-language: en
-license: mit
-tags:
-- sklearn
-- random-forest
-- classification
-datasets:
-- {SPLIT}
-metrics:
-- accuracy
-- f1
----
-
-# Tourism Package Prediction Model
-- Data: hf://datasets/{SPLIT}
-- Best params: {gs.best_params_}
-- Metrics: {metrics}
-- Pipeline includes preprocessing (imputer + onehot) + RandomForest.
-"""
           with open("models/README.md","w") as f:
             f.write(readme)
 
