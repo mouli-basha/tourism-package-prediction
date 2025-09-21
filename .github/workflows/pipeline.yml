@@ -1,0 +1,272 @@
+name: Tourism Project Pipeline
+
+on:
+  push:
+    branches:
+      - main  # Automatically triggers on push to the main branch
+  workflow_dispatch:
+
+jobs:
+
+  register-dataset:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN_TPP: ${{ secrets.HF_TOKEN_TPP }}
+      RAW_DATASET_REPO: moulibasha/tourism-package-prediction-dataset
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ci_requirements.txt
+      - name: Upload Dataset to Hugging Face Hub
+        env:
+          HF_TOKEN_TPP: ${{ env.HF_TOKEN_TPP }}
+        run: |
+          python - << 'PY'
+          import os
+          from huggingface_hub import HfApi, create_repo
+          from huggingface_hub.utils import RepositoryNotFoundError
+
+          token = os.environ["HF_TOKEN_TPP"]
+          repo  = os.environ["RAW_DATASET_REPO"]
+
+          api = HfApi(token=token)
+          try:
+              api.repo_info(repo_id=repo, repo_type="dataset")
+              print(f"Dataset repo '{repo}' exists.")
+          except RepositoryNotFoundError:
+              create_repo(repo_id=repo, repo_type="dataset", private=False, token=token)
+              print(f"Created dataset repo: {repo}")
+
+          local_csv = "tourism_project/data/tourism.csv"
+          if not os.path.exists(local_csv):
+              raise FileNotFoundError(f"{local_csv} not found in repo.")
+          api.upload_file(path_or_fileobj=local_csv, path_in_repo="data/tourism.csv",
+                          repo_id=repo, repo_type="dataset", token=token)
+          print(f" Uploaded raw CSV to https://huggingface.co/datasets/{repo}")
+          PY
+
+  data-prep:
+    needs: register-dataset
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN_TPP: ${{ secrets.HF_TOKEN_TPP }}
+      RAW_DATASET_REPO: moulibasha/tourism-package-prediction-dataset
+      SPLIT_DATASET_REPO: moulibasha/tourism-package-prediction-train-test
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python - m pip install --upgrade pip
+          pip install -r ci_requirements.txt
+      - name: Run Data Preparation
+        env:
+          HF_TOKEN_TPP: ${{ env.HF_TOKEN_TPP }}
+        run: |
+          python - << 'PY'
+          import os, numpy as np, pandas as pd
+          from datasets import load_dataset
+          from sklearn.model_selection import train_test_split
+          from huggingface_hub import HfApi, create_repo
+          from huggingface_hub.utils import RepositoryNotFoundError
+
+          RAW = os.environ["RAW_DATASET_REPO"]
+          SPLIT = os.environ["SPLIT_DATASET_REPO"]
+          token = os.environ["HF_TOKEN_TPP"]
+          TARGET = "ProdTaken"
+
+          ds = load_dataset(RAW, data_files="data/tourism.csv")
+          df = ds["train"].to_pandas()
+
+          for c in ("Unnamed: 0", "CustomerID"):
+              if c in df.columns: df.drop(columns=c, inplace=True)
+          for c in df.select_dtypes(include="object").columns:
+              df[c] = df[c].astype(str).str.strip().str.lower().replace({"nan": np.nan})
+          assert TARGET in df.columns, f"Target '{TARGET}' missing"
+          df[TARGET] = pd.to_numeric(df[TARGET], errors="coerce").fillna(0).astype(int)
+
+          before = len(df)
+          df = df.drop_duplicates().reset_index(drop=True)
+          print("Duplicates removed:", before - len(df))
+
+          X, y = df.drop(columns=[TARGET]), df[TARGET]
+          Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+          train = pd.concat([Xtr.reset_index(drop=True), ytr.reset_index(drop=True)], axis=1)
+          test  = pd.concat([Xte.reset_index(drop=True), yte.reset_index(drop=True)], axis=1)
+
+          train.to_csv("train.csv", index=False)
+          test.to_csv("test.csv", index=False)
+
+          api = HfApi(token=token)
+          try:
+              api.repo_info(repo_id=SPLIT, repo_type="dataset")
+              print(f"Dataset repo '{SPLIT}' exists.")
+          except RepositoryNotFoundError:
+              create_repo(repo_id=SPLIT, repo_type="dataset", private=False, token=token)
+              print(f"Created dataset repo: {SPLIT}")
+
+          api.upload_file(path_or_fileobj="train.csv", path_in_repo="train.csv",
+                          repo_id=SPLIT, repo_type="dataset", token=token)
+          api.upload_file(path_or_fileobj="test.csv", path_in_repo="test.csv",
+                          repo_id=SPLIT, repo_type="dataset", token=token)
+          print(f" Published splits to https://huggingface.co/datasets/{SPLIT}")
+          PY
+
+  model-traning:
+    needs: data-prep
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN_TPP: ${{ secrets.HF_TOKEN_TPP }}
+      SPLIT_DATASET_REPO: moulibasha/tourism-package-prediction-train-test
+      MODEL_REPO: moulibasha/tourism-package-prediction-model
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ci_requirements.txt
+      - name: Start MLflow Server
+        run: |
+          nohup mlflow ui --host 0.0.0.0 --port 5000 & 
+          sleep 5
+      - name: Model Building
+        env:
+          HF_TOKEN_TPP: ${{ env.HF_TOKEN_TPP }}
+        run: |
+          python - << 'PY'
+          import os, joblib, numpy as np, pandas as pd, mlflow
+          from sklearn.compose import ColumnTransformer
+          from sklearn.preprocessing import OneHotEncoder
+          from sklearn.impute import SimpleImputer
+          from sklearn.pipeline import Pipeline
+          from sklearn.ensemble import RandomForestClassifier
+          from sklearn.model_selection import GridSearchCV, StratifiedKFold
+          from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+          from huggingface_hub import HfApi, create_repo
+          from huggingface_hub.utils import RepositoryNotFoundError
+
+          SPLIT = os.environ["SPLIT_DATASET_REPO"]
+          MODEL = os.environ["MODEL_REPO"]
+          token = os.environ["HF_TOKEN_TPP"]
+
+          train = pd.read_csv(f"https://huggingface.co/datasets/{SPLIT}/resolve/main/train.csv")
+          test  = pd.read_csv(f"https://huggingface.co/datasets/{SPLIT}/resolve/main/test.csv")
+          ytr = train["ProdTaken"].astype(int); Xtr = train.drop(columns=["ProdTaken"])
+          yte = test["ProdTaken"].astype(int);  Xte = test.drop(columns=["ProdTaken"])
+
+          num = Xtr.select_dtypes(include=[np.number]).columns.tolist()
+          cat = Xtr.select_dtypes(exclude=[np.number]).columns.tolist()
+
+          pre = ColumnTransformer([
+              ("num", SimpleImputer(strategy="median"), num),
+              ("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
+                                ("onehot", OneHotEncoder(handle_unknown="ignore"))]), cat),
+          ])
+          pipe = Pipeline([("pre", pre), ("model", RandomForestClassifier(random_state=42))])
+
+          grid = {
+            "model__n_estimators": [150, 300],
+            "model__max_depth": [None, 10, 20],
+            "model__min_samples_split": [2, 5],
+            "model__min_samples_leaf": [1, 2],
+            "model__class_weight": [None, "balanced"],
+          }
+          cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+          gs = GridSearchCV(pipe, grid, cv=cv, scoring="f1", n_jobs=-1, verbose=1)
+
+          mlflow.set_experiment("tourism_rf_experiment")
+          with mlflow.start_run(run_name="rf_gridsearch"):
+              gs.fit(Xtr, ytr)
+              for k,v in gs.best_params_.items():
+                  mlflow.log_param(k, v)
+
+          preds = gs.best_estimator_.predict(Xte)
+          metrics = {
+              "accuracy":  float(accuracy_score(yte, preds)),
+              "precision": float(precision_score(yte, preds, zero_division=0)),
+              "recall":    float(recall_score(yte, preds, zero_division=0)),
+              "f1":        float(f1_score(yte, preds, zero_division=0)),
+          }
+          for k,v in metrics.items():
+              mlflow.log_metric(k, v)
+
+          os.makedirs("models", exist_ok=True)
+          joblib.dump(gs.best_estimator_, "models/model.pkl")
+
+          readme = f"""---
+language: en
+license: mit
+tags:
+- sklearn
+- random-forest
+- classification
+datasets:
+- {SPLIT}
+metrics:
+- accuracy
+- f1
+---
+
+# Tourism Package Prediction Model
+- Data: hf://datasets/{SPLIT}
+- Best params: {gs.best_params_}
+- Metrics: {metrics}
+- Pipeline includes preprocessing (imputer + onehot) + RandomForest.
+"""
+          with open("models/README.md","w") as f:
+            f.write(readme)
+
+          api = HfApi(token=token)
+          try:
+              api.repo_info(repo_id=MODEL, repo_type="model")
+              print(f"Model repo '{MODEL}' exists.")
+          except RepositoryNotFoundError:
+              create_repo(repo_id=MODEL, repo_type="model", private=False, token=token)
+              print(f"Created model repo: {MODEL}")
+
+          api.upload_file(path_or_fileobj="models/model.pkl", path_in_repo="model.pkl",
+                          repo_id=MODEL, repo_type="model", token=token)
+          api.upload_file(path_or_fileobj="models/README.md", path_in_repo="README.md",
+                          repo_id=MODEL, repo_type="model", token=token)
+          print(f" Model pushed to https://huggingface.co/{MODEL}")
+          PY
+
+  deploy-hosting:
+    runs-on: ubuntu-latest
+    needs: [model-traning, data-prep, register-dataset]
+    env:
+      HF_TOKEN_TPP: ${{ secrets.HF_TOKEN_TPP }}
+      SPACE_REPO: moulibasha/tourism-package-prediction
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ci_requirements.txt
+      - name: Push files to Frontend Hugging Face Space
+        env:
+          HF_TOKEN_TPP: ${{ env.HF_TOKEN_TPP }}
+        run: |
+          python - << 'PY'
+          import os
+          from huggingface_hub import create_repo, upload_file
+
+          SPACE = os.environ["SPACE_REPO"]
+          token = os.environ["HF_TOKEN_TPP"]
+
+          try:
+              create_repo(repo_id=SPACE, repo_type="space", space_sdk="streamlit", private=False, token=token)
+          except Exception:
+              pass
+
+          base = "tourism_project/deployment"
+          files = [("app.py","app.py"), ("requirements.txt","requirements.txt"), ("Dockerfile","Dockerfile")]
+          for local, remote in files:
+              path = os.path.join(base, local)
+              if os.path.exists(path):
+                  upload_file(path_or_fileobj=path, path_in_repo=remote,
+                              repo_id=SPACE, repo_type="space", token=token)
+                  print(f"Uploaded {local} -> {SPACE}/{remote}")
+          print(f" Space updated: https://huggingface.co/spaces/{SPACE}")
+          PY
