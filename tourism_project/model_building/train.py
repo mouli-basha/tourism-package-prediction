@@ -106,10 +106,21 @@ def main():
         create_repo(repo_id=MODEL_REPO, repo_type="model", private=False, token=HF_TOKEN)
         print(f"Created model repo: {MODEL_REPO}")
 
-    api.upload_file("models/model.pkl",  "model.pkl",
-                    repo_id=MODEL_REPO, repo_type="model", token=HF_TOKEN)
-    api.upload_file("models/README.md", "README.md",
-                    repo_id=MODEL_REPO, repo_type="model", token=HF_TOKEN)
+    api.upload_file(
+    path_or_fileobj="models/model.pkl",
+    path_in_repo="model.pkl",
+    repo_id=MODEL_REPO,
+    repo_type="model",
+    token=HF_TOKEN,
+    )
+
+    api.upload_file(
+    path_or_fileobj="models/README.md",
+    path_in_repo="README.md",
+    repo_id=MODEL_REPO,
+    repo_type="model",
+    token=HF_TOKEN,
+    )
 
     print(f" Model pushed: https://huggingface.co/{MODEL_REPO}  |  metrics={metrics}")
 
