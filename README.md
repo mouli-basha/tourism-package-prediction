@@ -59,6 +59,7 @@ pip install -r requirements.txt
 
 # run the app
 streamlit run app.py
+```
 
 ---
 
