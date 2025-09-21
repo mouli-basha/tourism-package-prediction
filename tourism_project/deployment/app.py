@@ -1,5 +1,7 @@
 # tourism_project/deployment/app.py
 
+import pandas as pd
+import joblib
 import streamlit as st
 import requests
 from io import BytesIO
