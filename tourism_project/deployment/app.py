@@ -8,7 +8,6 @@ from io import BytesIO
 
 # Page & Runtime config
 st.set_page_config(page_title="Tourism Package Prediction", layout="centered")
-st.set_option("server.enableXsrfProtection", False)  # disable XSRF for HF Spaces
 
 # HF locations
 MODEL_URL = "https://huggingface.co/moulibasha/tourism-package-prediction-model/resolve/main/model.pkl"
